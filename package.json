@@ -1,5 +1,5 @@
 {
-	"name": "playlist_merger",
+	"name": "spotify_playlist_merger",
 	"version": "1.0.0",
 	"description": "An app that merges small playlists into all possible combinations.",
 	"main": "index.js",
@@ -9,14 +9,14 @@
 	},
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/niklasmohrin/playlist_merger.git"
+		"url": "git+https://github.com/niklasmohrin/spotify_playlist_merger.git"
 	},
 	"author": "Niklas Mohrin",
 	"license": "ISC",
 	"bugs": {
-		"url": "https://github.com/niklasmohrin/playlist_merger/issues"
+		"url": "https://github.com/niklasmohrin/spotify_playlist_merger/issues"
 	},
-	"homepage": "https://github.com/niklasmohrin/playlist_merger#readme",
+	"homepage": "https://github.com/niklasmohrin/spotify_playlist_merger#readme",
 	"dependencies": {
 		"dotenv": "^8.0.0",
 		"express": "^4.17.1",
