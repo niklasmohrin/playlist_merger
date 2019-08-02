@@ -8,13 +8,13 @@ const CLIENT_SECRET = process.env.CLIENT_SECRET;
 const USER_NAME = process.env.USER_NAME;
 
 const BASE_LIST_PREFIX = "##";
-const MERGED_LIST_SEPERATOR = "+";
+const MERGED_LIST_SEPERATOR = "&";
+const MERGED_LIST_PREFIX = "#*";
 
 const app = express();
 
 app.get("/login", function(req, res) {
-	const scopes =
-		"user-read-private user-read-email playlist-read-private playlist-modify-public";
+	const scopes = "playlist-read-private playlist-modify-public";
 	res.redirect(
 		"https://accounts.spotify.com/authorize" +
 			"?response_type=code" +
@@ -68,7 +68,7 @@ app.get("/playlists", (req, res, next) => {
 		return;
 	}
 	rp.get({
-		url: "https://api.spotify.com/v1/me/playlists",
+		url: "https://api.spotify.com/v1/me/playlists?limit=50",
 		headers: {
 			Authorization: "Bearer " + access_token
 		}
@@ -115,24 +115,33 @@ app.get("/mergeplaylists", async (req, res, next) => {
 				querystring.stringify({ access_token })
 		)
 			.then(async playlists => {
+				// extract playlists from response and filter out followed unowned lists
 				const owned_lists = JSON.parse(playlists).filter(
 					l => l.owner.id === USER_NAME
 				);
+				// find playlists with prefix
 				const base_lists = owned_lists.filter(l =>
 					l.name.startsWith(BASE_LIST_PREFIX)
 				);
-				const base_names = base_lists.map(l =>
-					l.name.slice(len(BASE_LIST_PREFIX))
-				);
-				console.log({ base_names });
-				const merged_names = combinations(base_names)
-					.filter(names => names.length > 1)
-					.map(names => names.join(MERGED_LIST_SEPERATOR));
-				const playlist_ids = {};
-				outer: for (let list_name of merged_names) {
-					for (let list of owned_lists) {
-						if (list.name === list_name) {
-							playlist_ids[list_name] = list.id;
+				const merged_lists = combinations(base_lists)
+					.filter(lists => lists.length > 1)
+					.map(lists => {
+						return {
+							name:
+								MERGED_LIST_PREFIX +
+								lists
+									.map(l => l.name.slice(BASE_LIST_PREFIX.length))
+									.join(MERGED_LIST_SEPERATOR),
+							lists: lists
+						};
+					});
+				// loop over all (desired) merged lists
+				outer: for (let merged_list of merged_lists) {
+					const list_name = merged_list.name;
+					// check if there already is a playlist with the right name
+					for (let owned_list of owned_lists) {
+						if (owned_list.name === list_name) {
+							merged_list.id = owned_list.id;
 							continue outer;
 						}
 					}
@@ -153,8 +162,70 @@ app.get("/mergeplaylists", async (req, res, next) => {
 						.catch(err => {
 							throw err;
 						});
-					console.log({ created_list });
+					merged_list.id = JSON.parse(created_list).id;
 				}
+				// get track uris of songs in every base list
+				const tracks = {};
+				for (let list of base_lists) {
+					let response = {
+						next:
+							list.tracks.href +
+							"?" +
+							querystring.stringify({
+								fields: "total,next,items(track(uri))"
+							})
+					};
+					tracks[list.id] = [];
+					// api returns a max of 100 tracks at once, provides field "next" if there is more to come
+					while (response.next) {
+						// get next (up to 100) tracks
+						response = JSON.parse(
+							await rp
+								.get({
+									url:
+										list.tracks.href +
+										"?" +
+										querystring.stringify({
+											fields: "total,next,items(track(uri))"
+										}),
+									headers: {
+										Authorization: "Bearer " + access_token
+									}
+								})
+								.catch(err => {
+									throw err;
+								})
+						);
+						// append next tracks to arr
+						tracks[list.id].push(
+							...response.items.map(track => track.track.uri)
+						);
+					}
+				}
+
+				// update tracklist of every merged playlist
+				for (let { id: merged_id, lists } of merged_lists) {
+					const uris = [
+						...new Set(
+							lists
+								.map(list => tracks[list.id])
+								.reduce((acc, cur) => acc.concat(cur), [])
+						)
+					];
+					rp.put({
+						url: `https://api.spotify.com/v1/playlists/${merged_id}/tracks`,
+						headers: {
+							Authorization: "Bearer " + access_token,
+							"Content-Type": "application/json"
+						},
+						body: JSON.stringify({
+							uris: uris
+						})
+					}).catch(err => {
+						throw err;
+					});
+				}
+				console.log(`Updated ${merged_lists.length} playlists.`);
 			})
 			.catch(err => {
 				throw err;
