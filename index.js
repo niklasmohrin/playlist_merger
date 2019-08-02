@@ -1,21 +1,25 @@
 const express = require("express");
-const request = require("request");
+const rp = require("request-promise-native");
 const querystring = require("querystring");
 
 require("dotenv").config();
-const client_id = process.env.CLIENT_ID;
-const client_secret = process.env.CLIENT_SECRET;
+const CLIENT_ID = process.env.CLIENT_ID;
+const CLIENT_SECRET = process.env.CLIENT_SECRET;
 const USER_NAME = process.env.USER_NAME;
+
+const BASE_LIST_PREFIX = "##";
+const MERGED_LIST_SEPERATOR = "+";
 
 const app = express();
 
 app.get("/login", function(req, res) {
-	const scopes = "user-read-private user-read-email playlist-read-private";
+	const scopes =
+		"user-read-private user-read-email playlist-read-private playlist-modify-public";
 	res.redirect(
 		"https://accounts.spotify.com/authorize" +
 			"?response_type=code" +
 			"&client_id=" +
-			client_id +
+			CLIENT_ID +
 			(scopes ? "&scope=" + encodeURIComponent(scopes) : "") +
 			"&redirect_uri=" +
 			encodeURIComponent("http://localhost:8000/callback")
@@ -23,71 +27,144 @@ app.get("/login", function(req, res) {
 });
 
 app.get("/callback", (req, res, next) => {
-	request.post(
-		{
-			url: "https://accounts.spotify.com/api/token",
-			form: {
-				code: req.query.code,
-				grant_type: "authorization_code",
-				redirect_uri: "http://localhost:8000/callback"
-			},
-			headers: {
-				Authorization:
-					"Basic " +
-					Buffer.from(`${client_id}:${client_secret}`).toString("base64")
-			},
-			json: true
+	rp.post({
+		url: "https://accounts.spotify.com/api/token",
+		form: {
+			code: req.query.code,
+			grant_type: "authorization_code",
+			redirect_uri: "http://localhost:8000/callback"
 		},
-		(err, response, body) => {
-			if (!err && response.statusCode === 200) {
-				const { access_token, refresh_token } = body;
-				res.redirect(
-					"http://localhost:8000/playlists?" +
-						querystring.stringify({ access_token, refresh_token })
-				);
-			} else {
-				console.log({ err });
-				res.redirect("http://localhost:8000/home" + querystring.stringify(err));
-			}
-		}
-	);
+		headers: {
+			Authorization:
+				"Basic " +
+				Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString("base64")
+		},
+		json: true
+	})
+		.then(response => {
+			const { access_token, refresh_token } = response;
+			res.redirect(
+				"http://localhost:8000/mergeplaylists?" +
+					querystring.stringify({ access_token, refresh_token })
+			);
+		})
+		.catch(err => {
+			console.log({ err });
+			res.redirect("http://localhost:8000/home" + querystring.stringify(err));
+		});
 });
 
 app.get("/home", (req, res, next) => {
-	res.send(req.query);
+	// res.send(req.query);
+	res.send(
+		"<button onClick=\"fetch('/mergeplaylists')\" >merge playlists </button>  "
+	);
 });
 
-app.get("/playlists", async (req, res, next) => {
+app.get("/playlists", (req, res, next) => {
 	const { access_token } = req.query;
-	request.get(
-		{
-			url: "https://api.spotify.com/v1/me/playlists",
-			headers: {
-				Authorization: "Bearer " + access_token
-			}
-		},
-		(err, response, body) => {
-			if (!err && response.statusCode === 200) {
-				const playlists = JSON.parse(body).items;
-				if (!playlists) {
-					res.redirect("/home?err=noLists");
-					return;
-				}
-				const owned_playlists = playlists.filter(
-					el => el.owner.id === USER_NAME
-				);
-				const pl_names = owned_playlists.map(el => el.name);
-				// console.log(owned_playlists);
-				res.send(pl_names);
-			} else {
-				console.log({ err });
-				res.redirect("http://localhost:8000/home" + querystring.stringify(err));
-			}
+	if (!access_token) {
+		res.redirect("/home?err=noToken");
+		return;
+	}
+	rp.get({
+		url: "https://api.spotify.com/v1/me/playlists",
+		headers: {
+			Authorization: "Bearer " + access_token
 		}
-	);
+	})
+		.then(response => {
+			const playlists = JSON.parse(response).items;
+			if (!playlists) {
+				res.status(404).send();
+				return;
+			} else {
+				res.send(playlists);
+			}
+		})
+		.catch(err => {
+			console.log({ err });
+			res.redirect("http://localhost:8000/home" + querystring.stringify(err));
+		});
+});
+
+function combinations(arr) {
+	const fn = function(active, rest, a) {
+		if (!active.length && !rest.length) return;
+		if (!rest.length) {
+			a.push(active);
+		} else {
+			fn(active.concat(rest[0]), rest.slice(1), a);
+			fn(active, rest.slice(1), a);
+		}
+		return a;
+	};
+	const result = fn([], arr, []);
+	return result ? result : [];
+}
+
+app.get("/mergeplaylists", async (req, res, next) => {
+	console.log("Called mergeplaylists");
+	const { access_token } = req.query;
+	if (!access_token) {
+		res.redirect("/login");
+		return;
+	} else {
+		rp.get(
+			"http://localhost:8000/playlists?" +
+				querystring.stringify({ access_token })
+		)
+			.then(async playlists => {
+				const owned_lists = JSON.parse(playlists).filter(
+					l => l.owner.id === USER_NAME
+				);
+				const base_lists = owned_lists.filter(l =>
+					l.name.startsWith(BASE_LIST_PREFIX)
+				);
+				const base_names = base_lists.map(l =>
+					l.name.slice(len(BASE_LIST_PREFIX))
+				);
+				console.log({ base_names });
+				const merged_names = combinations(base_names)
+					.filter(names => names.length > 1)
+					.map(names => names.join(MERGED_LIST_SEPERATOR));
+				const playlist_ids = {};
+				outer: for (let list_name of merged_names) {
+					for (let list of owned_lists) {
+						if (list.name === list_name) {
+							playlist_ids[list_name] = list.id;
+							continue outer;
+						}
+					}
+					// if there is no fitting playlist yet, create one
+					console.log("Creating list with name " + list_name);
+					const created_list = await rp
+						.post({
+							url: "https://api.spotify.com/v1/me/playlists",
+							headers: {
+								Authorization: "Bearer " + access_token,
+								"Content-Type": "application/json"
+							},
+							body: JSON.stringify({
+								name: list_name,
+								description: "Automatically generated by playlist_merger"
+							})
+						})
+						.catch(err => {
+							throw err;
+						});
+					console.log({ created_list });
+				}
+			})
+			.catch(err => {
+				throw err;
+			});
+		res.send("Merging...");
+	}
 });
 
 app.get("/", (req, res, next) =>
 	res.send('Hello World<br /><a href="/login">login</a>')
 );
+
 app.listen(8000, () => console.log("Server listening at port 8000"));
